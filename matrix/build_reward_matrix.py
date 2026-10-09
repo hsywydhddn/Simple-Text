@@ -206,7 +206,9 @@ def build_transition_prompts(
 
         val_sentence = row["Sentence"]
 
-        if src_level not in ["C2", "C1", "B2"]:
+        # Build every downward transition because IAPS may use an
+        # intermediate level as the source of the next step.
+        if src_level not in ["C2", "C1", "B2", "A2", "B1"]:
             continue
 
         val_emb = sts_model.encode(val_sentence, convert_to_tensor=True)
