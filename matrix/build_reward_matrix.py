@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import torch
 from tqdm import tqdm
+from core.llm_client import OpenAICompatGenerator, load_dotenv_file
 
 # ============================================================
 # 路径配置：切换语料 / 模型时只需修改以下变量
@@ -113,28 +114,37 @@ def generate_with_vllm(prompts):
     Returns:
         生成的简化句列表。
     """
-    from vllm import LLM, SamplingParams
-
-    print("\n>>> 加载 vLLM...")
-
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=128, top_p=0.95)
-
-    llm = LLM(model=MODEL_PATH, tensor_parallel_size=1, enforce_eager=False)
-
     print(f">>> 生成 {len(prompts)} 个简化版本...")
 
+    server_url = os.getenv("OPENAI_API_BASE_URL", "").strip()
+    server_model = os.getenv("OPENAI_API_MODEL", "").strip() or MODEL_PATH
+    if server_url:
+        if not server_model or "替换为" in server_model:
+            raise ValueError(
+                "Set OPENAI_API_MODEL to the exact model id returned by "
+                "GET /v1/models."
+            )
+        generator = OpenAICompatGenerator(
+            api_base_url=server_url,
+            api_key=os.getenv("OPENAI_API_KEY", "EMPTY"),
+            model_name=server_model,
+            temperature=0.0,
+            top_p=0.95,
+            max_tokens=128,
+            timeout=300,
+        )
+        return [text.strip() for text in generator.generate_texts(prompts)]
+
+    from vllm import LLM, SamplingParams
+
+    print("\n>>> 加载本地 vLLM...")
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=128, top_p=0.95)
+    llm = LLM(model=MODEL_PATH, tensor_parallel_size=1, enforce_eager=False)
     outputs = llm.generate(prompts, sampling_params)
-
     generated_texts = [out.outputs[0].text.strip() for out in outputs]
-
-    print(">>> 释放 vLLM 显存...")
-
     del llm
-
     gc.collect()
-
     torch.cuda.empty_cache()
-
     return generated_texts
 
 
@@ -585,6 +595,7 @@ def main():
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
+    load_dotenv_file(repo_root / "local_config.env")
     data_root = Path(args.data_root).expanduser() if args.data_root else repo_root / "data" / "en"
     if args.corpus == "README":
         default_train = data_root / "readme_en_train.csv"
@@ -593,7 +604,7 @@ def main():
         default_train = data_root / "CEFR-SP_en_train.csv"
         default_val = data_root / "CEFR-SP_en_dev.csv"
 
-    MODEL_PATH = args.model_path
+    MODEL_PATH = args.model_path or os.getenv("OPENAI_API_MODEL", "").strip()
     TRAIN_DATA_PATH = args.train_path or str(default_train)
     VAL_DATA_PATH = args.val_path or str(default_val)
     STS_MODEL = args.sts_model
@@ -608,7 +619,9 @@ def main():
     READABERT_LOCAL_PATH = args.readabert_path
 
     if not MODEL_PATH:
-        raise ValueError("Missing --model_path or VLLM_MODEL_PATH.")
+        raise ValueError(
+            "Missing --model_path/VLLM_MODEL_PATH or OPENAI_API_MODEL."
+        )
     if args.mode == "r_base" and not READABERT_LOCAL_PATH:
         raise ValueError("Missing --readabert_path or READABERT_LOCAL_PATH.")
 
