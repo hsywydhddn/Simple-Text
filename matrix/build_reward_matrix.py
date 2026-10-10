@@ -310,8 +310,26 @@ def evaluate_with_readme(generated_texts):
     return predictions
 
 
+def evaluate_with_local_readabert(generated_texts):
+    """Predict CEFR levels with the local readabert-en checkpoint."""
+    if not READABERT_LOCAL_PATH:
+        raise ValueError(
+            "Missing local readabert-en path. Set --readabert_path or "
+            "READABERT_LOCAL_PATH."
+        )
+
+    predicted_levels = predict_readabert_en(generated_texts)
+    failed = sum(level is None for level in predicted_levels)
+    if failed:
+        raise RuntimeError(
+            f"Local readabert-en failed to classify {failed} generated texts."
+        )
+
+    return [RATING_TO_CEFR[int(level)] for level in predicted_levels]
+
+
 def predict_readabert_en(generated_texts):
-    """使用 readabert-en 本地模型预测句子 CEFR 等级（R_base 用）。
+    """使用 readabert-en 本地模型预测句子 CEFR 等级。
 
     与 evaluation/eval_res.py 的加载方式一致：从本地路径加载
     transformers 序列分类模型，输出 logits 取 argmax 后 +1 映射为 1-6 等级。
@@ -624,7 +642,7 @@ def main():
         raise ValueError(
             "Missing --model_path/VLLM_MODEL_PATH or OPENAI_API_MODEL."
         )
-    if args.mode == "r_base" and not READABERT_LOCAL_PATH:
+    if not READABERT_LOCAL_PATH:
         raise ValueError("Missing --readabert_path or READABERT_LOCAL_PATH.")
 
     if args.mode == "r_base":
@@ -658,7 +676,7 @@ def main():
 
     generated_texts = generate_with_vllm(prompts)
 
-    predictions = evaluate_with_readme(generated_texts)
+    predictions = evaluate_with_local_readabert(generated_texts)
 
     matrix = build_reward_matrix(predictions, metadata)
 
