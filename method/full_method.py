@@ -246,7 +246,7 @@ def rerank_candidates(
 
         scores.append(score)
 
-    best_idx = int(np.argmax(scores))
+    best_idx = int(np.argmin(scores))
 
     return candidates[best_idx]
 
