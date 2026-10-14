@@ -19,7 +19,6 @@ from method.common import (
     build_compact_memory,
     extract_facts_heuristic,
     extract_facts_llm,
-    build_iaps_calibration,
     load_iaps_calibration as load_method_calibration,
     generate_candidates,
     get_dynamic_prompt,
@@ -627,18 +626,16 @@ def main():
     if calibration_path.exists():
         calibration = load_method_calibration(calibration_path)
     else:
-        calibration = build_iaps_calibration(case_dict_expert)
-        calibration_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(calibration_path, "w", encoding="utf-8") as handle:
-            json.dump(calibration, handle, indent=2)
-        print(
-            "[Warning] Calibration file was absent. Wrote a provisional calibration "
-            f"with parallel-corpus rho to {calibration_path}. "
-            "Use validation-fitted parameters for final results."
+        raise FileNotFoundError(
+            "Validation-fitted calibration is required for the main experiment: "
+            f"{calibration_path}. Run matrix/build_reward_matrix.py --mode r_base "
+            "with train/validation paths first."
         )
 
     TARGET_COMPLEXITY.update(calibration["level_complexity"])
     TARGET_LENGTH_RATIO.update(calibration["length_ratio"])
+    retrieval_weights = tuple(calibration["retrieval_weights"])
+    rerank_weights = tuple(calibration["rerank_weights"])
     print(f"[*] IAPS calibration: {calibration_path}")
 
     test_file = resolve_split_file(args.corpus, lang, "test", data_root=data_root)
@@ -730,7 +727,7 @@ def main():
                             k=3,
                             target_cefr=step_target,
                             complexity_analyzer=analyzer,
-                            weights=(args.l1, args.l2, args.l3),
+                            weights=retrieval_weights,
                             target_complexities=TARGET_COMPLEXITY,
                         )
 
@@ -772,7 +769,7 @@ def main():
                             step_target,
                             selector,
                             analyzer,
-                            weights=(args.ws, args.wc, args.wl),
+                            weights=rerank_weights,
                         )
 
                     if not args.disable_history:

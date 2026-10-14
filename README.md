@@ -137,10 +137,11 @@ printf '%s\n' "$READABERT_LOCAL_PATH"
    PYTHONPATH=. python inference/zero_shot_dp_inference.py ...      # zero-shot 推理
    ```
    
-   主实验使用 IAPS 实例自适应路径。正式运行时应将严格命中的
-   `R_base` 矩阵通过 `--matrix_path` 传入；如果未提供
-   `--calibration_path`，程序会从专家平行示例统计 `rho(l)` 并写出临时校准文件，
-   最终论文结果应替换为验证集拟合的校准参数。
+   主实验使用 IAPS 实例自适应路径。正式运行时应将 `R_base` 矩阵和
+   `--mode r_base` 生成的校准文件通过 `--matrix_path` 与
+   `--calibration_path` 传入。校准阶段使用训练集拟合复杂度权重和等级锚点，
+   使用验证集拟合 `beta`、检索权重 `lambda` 以及候选重排权重，
+   并从专家平行语料统计 `rho(l)`；主实验不会在缺少校准文件时自动创建固定参数。
 
    最小连通性测试（每个起始等级只跑 1 条，仍会调用 LLM 服务）：
    ```bash
@@ -191,13 +192,13 @@ printf '%s\n' "$READABERT_LOCAL_PATH"
 | `--model_path` | 环境变量 | 本地 LLM 路径，传给 vLLM；也可使用 `VLLM_MODEL_PATH` |
 | `--tensor_parallel_size` | 1 | vLLM 使用的 GPU 张量并行数 |
 | `--matrix_path` | 自动 | 严格命中的 IAPS `R_base` 矩阵路径 |
-| `--calibration_path` | 自动 | IAPS 校准文件；缺失时从专家平行示例统计 `rho(l)` |
+| `--calibration_path` | 自动 | 验证集拟合的 IAPS 校准文件；正式实验必须显式提供 |
 | `--disable_dynamic_path` | 关 | 禁用动态路径，使用静态 DP 策略 |
 | `--disable_dynamic_retrieval` | 关 | 禁用语义检索，随机选取示例 |
 | `--disable_rerank` | 关 | 禁用多候选重排 |
 | `--disable_fact_memory` | 关 | 禁用事实记忆块 |
 | `--sample_size` | 0 | 每个起始等级只处理前 N 句（0 = 全部） |
-| `--l1 / --l2 / --l3` | 0.6 / 0.2 / 0.2 | 语义检索权重（语义 / 源对齐 / 目标对齐） |
-| `--ws / --wc / --wl` | 0.55 / 0.30 / 0.15 | 多候选重排权重（语义 / 复杂度 / 长度） |
+| `--l1 / --l2 / --l3` | CLI 后备值 | 语义检索权重；正式主实验从校准文件读取验证集拟合值 |
+| `--ws / --wc / --wl` | CLI 后备值 | 多候选重排权重；正式主实验从校准文件读取验证集拟合值 |
 | `--model_name` | 自动 | README 使用默认模型名；CEFR-SP 从配置的 OpenAI 兼容服务获取模型名 |
 | `--temperature` | 0.3 | 采样温度 |

@@ -22,6 +22,7 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 from core.llm_client import OpenAICompatGenerator, load_dotenv_file
+from method.common import TextComplexityAnalyzer, fit_iaps_calibration_from_validation
 
 # ============================================================
 # 路径配置：切换语料 / 模型时只需修改以下变量
@@ -47,6 +48,8 @@ OUTPUT_PATH = ""
 
 # R_base 基础转移成功率输出路径
 R_BASE_OUTPUT_PATH = "r_base_matrix.json"
+CALIBRATION_OUTPUT_PATH = ""
+EXPERT_CASE_PATH = ""
 
 # readabert-en 本地模型路径（句子等级预测用，与 evaluation/eval_res.py 一致）
 READABERT_LOCAL_PATH = ""
@@ -486,7 +489,7 @@ def build_r_base_prompts(df_val):
 
             prompts.append(prompt)
 
-            combos.append((src_int, tgt_int))
+            combos.append((src_int, tgt_int, sentence))
 
     return prompts, combos
 
@@ -496,11 +499,11 @@ def compute_r_base(df_val, laplace_alpha=1.0):
 
     流程：从验证集提取初始等级为 i 的句子 -> 使用最基础提示词要求模型
     直接降级到目标等级 j -> vLLM 生成简化句 -> readabert-en 预测等级 ->
-    预测等级等于目标等级 j 记为成功 -> 成功数 / 总数。
+    预测等级达到目标等级或更简单（predicted <= target）记为成功。
 
     Args:
         df_val: 验证集 DataFrame。
-        成功口径固定为预测等级严格等于目标等级。
+        成功口径固定为 predicted_level <= target_level。
 
     Returns:
         R_base 矩阵 dict，键形如 "6_3"，值为成功率（0-1）。
@@ -512,7 +515,7 @@ def compute_r_base(df_val, laplace_alpha=1.0):
     if not prompts:
         print(" 验证集中没有匹配的初始等级样本，请检查 VAL_DATA_PATH。")
 
-        return {}
+        return {}, []
 
     print(f">>> [2/3] vLLM 基础提示词生成（共 {len(prompts)} 条）...")
 
@@ -525,14 +528,17 @@ def compute_r_base(df_val, laplace_alpha=1.0):
     success_by_key = defaultdict(int)
 
     total_by_key = defaultdict(int)
+    observations = []
 
-    for (src_int, tgt_int), pred_int in zip(combos, pred_levels):
+    for (src_int, tgt_int, source_text), pred_int in zip(combos, pred_levels):
         total_by_key[f"{src_int}_{tgt_int}"] += 1
 
         if pred_int is None:
             ok = False
         else:
-            ok = pred_int == tgt_int
+            ok = pred_int is not None and pred_int <= tgt_int
+        features = TextComplexityAnalyzer.compute_features(source_text)
+        observations.append((features, src_int, tgt_int, int(ok)))
 
         if ok:
             success_by_key[f"{src_int}_{tgt_int}"] += 1
@@ -557,14 +563,14 @@ def compute_r_base(df_val, laplace_alpha=1.0):
 
         print(
             f"  R_base[{key}] = {r_base[key]['smoothed_rate']:.4f} "
-            f"(raw={raw_rate:.4f}, n={n}, success_mode=exact)"
+            f"(raw={raw_rate:.4f}, n={n}, success_mode=at_or_below)"
         )
 
-    return r_base
+    return r_base, observations
 
 
 def run_r_base():
-    """R_base 主流程：读取验证集 -> 计算 R_base 矩阵 -> 保存 JSON。"""
+    """Fit corpus calibration and R_base using train/dev splits."""
     print("=" * 60)
 
     print(" 计算论文 3.2 节 R_base(i, j) 基础转移成功率")
@@ -578,18 +584,31 @@ def run_r_base():
 
         return
 
+    df_train = pd.read_csv(TRAIN_DATA_PATH)
     df_val = pd.read_csv(VAL_DATA_PATH)
 
-    r_base = compute_r_base(df_val, laplace_alpha=1.0)
+    r_base, observations = compute_r_base(df_val, laplace_alpha=1.0)
 
     if r_base:
         save_matrix(r_base, R_BASE_OUTPUT_PATH, label="R_base")
+        case_dict = {}
+        if Path(EXPERT_CASE_PATH).exists():
+            with open(EXPERT_CASE_PATH, "r", encoding="utf-8") as handle:
+                case_dict = json.load(handle)
+        calibration = fit_iaps_calibration_from_validation(
+            df_train, df_val, case_dict, observations
+        )
+        Path(CALIBRATION_OUTPUT_PATH).parent.mkdir(parents=True, exist_ok=True)
+        with open(CALIBRATION_OUTPUT_PATH, "w", encoding="utf-8") as handle:
+            json.dump(calibration, handle, indent=2)
+        print(f"验证集校准参数已保存到：{CALIBRATION_OUTPUT_PATH}")
 
 
 def main():
     """奖励矩阵构建主流程（统一单文件入口）。"""
     global MODEL_PATH, TRAIN_DATA_PATH, VAL_DATA_PATH, STS_MODEL
-    global STS_IS_LOCAL, OUTPUT_PATH, R_BASE_OUTPUT_PATH, READABERT_LOCAL_PATH
+    global STS_IS_LOCAL, OUTPUT_PATH, R_BASE_OUTPUT_PATH
+    global CALIBRATION_OUTPUT_PATH, EXPERT_CASE_PATH, READABERT_LOCAL_PATH
 
     parser = argparse.ArgumentParser(description="Build Reward Matrix / R_base")
 
@@ -608,6 +627,8 @@ def main():
     parser.add_argument("--val_path", default=None)
     parser.add_argument("--output_path", default=None)
     parser.add_argument("--r_base_output_path", default=None)
+    parser.add_argument("--calibration_output_path", default=None)
+    parser.add_argument("--expert_case_file", default=None)
     parser.add_argument("--readabert_path", default=os.getenv("READABERT_LOCAL_PATH", ""))
     parser.add_argument("--sts_model", default=STS_MODEL)
     parser.add_argument("--sts_is_local", action="store_true")
@@ -635,6 +656,18 @@ def main():
     )
     R_BASE_OUTPUT_PATH = args.r_base_output_path or str(
         repo_root / "LLMGeneration" / "matrices" / f"r_base_{corpus_name}.json"
+    )
+    CALIBRATION_OUTPUT_PATH = args.calibration_output_path or str(
+        repo_root / "LLMGeneration" / "matrices"
+        / f"iaps_calibration_{corpus_name}.json"
+    )
+    default_case = (
+        "en_expert_case_readme.json"
+        if args.corpus == "README"
+        else "en_expert_case_cefrsp.json"
+    )
+    EXPERT_CASE_PATH = args.expert_case_file or str(
+        repo_root / "data" / "prompt_expert" / default_case
     )
     READABERT_LOCAL_PATH = args.readabert_path
 
